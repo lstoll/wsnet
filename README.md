@@ -1,5 +1,7 @@
 # wsnet
 
+[![Build Status](https://travis-ci.org/lstoll/wsnet.svg?branch=master)](https://travis-ci.org/lstoll/wsnet)
+
 Dial/Listen, but tunneled over websockets. Designed to make grpc work on Heroku.
 
 ![A gif because why not](https://cdn.lstoll.net/screen/screencast_2016-04-22_19-35-31.gif)
