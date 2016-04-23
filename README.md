@@ -27,7 +27,7 @@ s.Serve(lis)
 grpc client:
 
 ```
-conn, err := grpc.Dial(address, grpc.WithInsecure(), grpc.WithDialer(wsnet.Dial))
+conn, err := grpc.Dial("ws://127.0.0.1:8080", grpc.WithInsecure(), grpc.WithDialer(wsnet.Dial))
 if err != nil {
 	log.Fatalf("did not connect: %v", err)
 }
