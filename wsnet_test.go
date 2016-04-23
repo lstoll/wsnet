@@ -25,7 +25,7 @@ func TestEndToEnd(t *testing.T) {
 			b := bufio.NewReader(client)
 			for {
 				line, err := b.ReadBytes('\n')
-				if err != nil { // EOF, or worse
+				if err != nil {
 					break
 				}
 				client.Write(line)

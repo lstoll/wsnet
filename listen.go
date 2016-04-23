@@ -52,13 +52,15 @@ func (w *wsServer) wsHandler(ws *websocket.Conn) {
 	stopHb := make(chan struct{})
 	if w.pingInterval > 0 {
 		go func() {
-			time.Sleep(w.pingInterval)
-			select {
-			case <-stopHb:
-				return
-			default:
+			for {
+				time.Sleep(w.pingInterval)
+				select {
+				case <-stopHb:
+					return
+				default:
+				}
+				websocket.Message.Send(wsconn.conn, []byte{frameTypeKeepalive})
 			}
-			websocket.Message.Send(wsconn.conn, []byte{frameTypeKeepalive})
 		}()
 	}
 	w.conns <- wsconn
