@@ -11,7 +11,7 @@ const listenPort = "19546"
 
 func TestEndToEnd(t *testing.T) {
 	// Start a server
-	server, err := Listen("127.0.0.1:" + listenPort)
+	server, err := ListenWithKeepalive("127.0.0.1:"+listenPort, 1*time.Millisecond)
 	defer server.Close()
 	if server == nil {
 		t.Fatal("couldn't start listening: ", err)
@@ -47,9 +47,8 @@ func TestEndToEnd(t *testing.T) {
 			if resp != "PING\n" {
 				t.Fatalf("Expected %q, got %q", "PING\n", resp)
 			}
+			time.Sleep(5 * time.Millisecond)
 		}
 		conn.Close()
 	}
-
-	// Connect to if a few times and have a chat
 }
