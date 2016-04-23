@@ -1,5 +1,8 @@
 ---
 language: go
+# Get this for multi lang
+sudo: required
+dist: trusty
 go:
   - 1.6
-script: go test -v $(go list ./... | grep -v /vendor/)
+script: ./script/cibuild

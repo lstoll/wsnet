@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+
+echo "--> Testing go code"
+go test -v $(go list ./... | grep -v /vendor/)
+
+echo "--> Testing js code"
+npm install
+./js/test/test.sh
