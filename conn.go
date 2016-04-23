@@ -1,10 +1,16 @@
 package wsnet
 
 import (
+	"fmt"
 	"net"
 	"time"
 
 	"golang.org/x/net/websocket"
+)
+
+const (
+	frameTypeData      byte = 0x00
+	frameTypeKeepalive byte = 0x01
 )
 
 type wsConn struct {
@@ -15,7 +21,19 @@ type wsConn struct {
 
 func (w *wsConn) Read(b []byte) (n int, err error) {
 	if len(w.rbuf) == 0 {
-		err = websocket.Message.Receive(w.conn, &w.rbuf)
+		in := []byte{}
+		err = websocket.Message.Receive(w.conn, &in)
+		if err != nil {
+			return
+		}
+		switch in[0] {
+		case frameTypeData:
+			w.rbuf = in[1:]
+		case frameTypeKeepalive:
+			// Do nothing, it's just a make work frame
+		default:
+			panic(fmt.Sprintf("Received a websocket frame with an unknown type: %#x", in[0]))
+		}
 	}
 	n = copy(b, w.rbuf)
 	w.rbuf = w.rbuf[n:]
@@ -23,7 +41,7 @@ func (w *wsConn) Read(b []byte) (n int, err error) {
 }
 
 func (w *wsConn) Write(b []byte) (n int, err error) {
-	err = websocket.Message.Send(w.conn, b)
+	err = websocket.Message.Send(w.conn, append([]byte{frameTypeData}, b...))
 	n = len(b)
 	return
 }
