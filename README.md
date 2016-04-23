@@ -10,6 +10,10 @@ Dial/Listen, but tunneled over websockets. Designed to make grpc work on Heroku.
 
 Use wherever you'd use `net.Listen` and `net.Dial`.
 
+Theres also a `ListenWithKeepalive` variant - this can be provided with a duration. This will
+then regularly send small frames down the wire, which can be used to prevent the heroku router
+from terminating the connection
+
 ## Examples
 
 grpc server:
