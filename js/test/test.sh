@@ -1,6 +1,6 @@
 #!/bin/bash
 
-trap 'kill $(jobs -p); killall echo' EXIT
+trap 'kill -9 $(jobs -p);' EXIT
 
 echo '--> Starting services to test'
 
