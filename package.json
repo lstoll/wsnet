@@ -13,6 +13,6 @@
   "keywords": [
     "wsnet"
   ],
-  "main": "js/index.js",
+  "main": "js/src/index.js",
   "license": "MIT"
 }
