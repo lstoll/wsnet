@@ -44,7 +44,3 @@ if err != nil {
 log.Printf("Greeting: %s", r.Message)
 
 ```
-
-## TODO
-
-* A way to avoid the router idle timeout? Maybe an internal heartbeat frame?
