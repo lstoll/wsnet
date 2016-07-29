@@ -35,8 +35,14 @@ func ListenWithKeepalive(laddr string, pingInterval time.Duration) (net.Listener
 		conns:        make(chan *wsConn),
 		pingInterval: pingInterval,
 	}
-	http.Handle("/", websocket.Handler(wss.wsHandler))
-	go http.Serve(listener, nil)
+	serveMux := http.NewServeMux()
+	serveMux.Handle("/", websocket.Handler(wss.wsHandler))
+	go func() {
+		err = http.Serve(listener, serveMux)
+		if err != nil {
+			panic(err)
+		}
+	}()
 	return wss, nil
 }
 
