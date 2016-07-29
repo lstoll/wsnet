@@ -40,6 +40,37 @@ func TestEndToEnd(t *testing.T) {
 			},
 			dialer: func(addr string) (net.Conn, error) { return Dial("ws://"+addr+"/wsnet", 2*time.Second) },
 		},
+		{
+			// Handler + http auth
+			listener: func(addr string) (net.Listener, error) {
+				hl, err := net.Listen("tcp", addr)
+				if err != nil {
+					return nil, err
+				}
+				lis, h := HandlerWithKeepalive(2 * time.Second)
+				auth := func(fn http.Handler) http.HandlerFunc {
+					return func(w http.ResponseWriter, r *http.Request) {
+						user, pass, _ := r.BasicAuth()
+						if user == "testu" && pass == "password" {
+							fn.ServeHTTP(w, r)
+							return
+						}
+						w.Header().Set("WWW-Authenticate", "Basic")
+						http.Error(w, "Unauthorized.", 401)
+					}
+				}
+				serveMux := http.NewServeMux()
+				serveMux.Handle("/wsnet", auth(h))
+				go func() {
+					err = http.Serve(hl, serveMux)
+					if err != nil {
+						panic(err)
+					}
+				}()
+				return lis, nil
+			},
+			dialer: func(addr string) (net.Conn, error) { return Dial("ws://testu:password@"+addr+"/wsnet", 2*time.Second) },
+		},
 	} {
 		// get someone to allocate us a port
 		lis, err := net.Listen("tcp", "127.0.0.1:0")
