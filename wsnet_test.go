@@ -11,43 +11,39 @@ import (
 
 func TestEndToEnd(t *testing.T) {
 	// Start a server
-	for rn, tc := range [...]struct {
-		listener func(addr string) (net.Listener, error)
+	for _, tc := range []struct {
+		name     string
+		listener func() (addr string, lis net.Listener, err error)
 		dialer   func(addr string) (net.Conn, error)
 	}{
 		{
-			// Straight up listener/dialer
-			listener: func(addr string) (net.Listener, error) { return ListenWithKeepalive(addr, 1*time.Millisecond) },
-			dialer:   func(addr string) (net.Conn, error) { return Dial("ws://"+addr, 2*time.Second) },
-		},
-		{
-			// Custom handler stuff
-			listener: func(addr string) (net.Listener, error) {
-				hl, err := net.Listen("tcp", addr)
+			name: "Custom handler stuff",
+			listener: func() (string, net.Listener, error) {
+				hl, err := net.Listen("tcp", "127.0.0.1:0")
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
-				lis, h := HandlerWithKeepalive(2 * time.Second)
+				sh := &WSServer{PingInterval: 1 * time.Millisecond}
 				serveMux := http.NewServeMux()
-				serveMux.Handle("/wsnet", h)
+				serveMux.Handle("/wsnet", sh)
 				go func() {
 					err = http.Serve(hl, serveMux)
 					if err != nil {
 						panic(err)
 					}
 				}()
-				return lis, nil
+				return hl.Addr().String(), sh, nil
 			},
 			dialer: func(addr string) (net.Conn, error) { return Dial("ws://"+addr+"/wsnet", 2*time.Second) },
 		},
 		{
-			// Handler + http auth
-			listener: func(addr string) (net.Listener, error) {
-				hl, err := net.Listen("tcp", addr)
+			name: "Handler + http auth",
+			listener: func() (string, net.Listener, error) {
+				hl, err := net.Listen("tcp", "127.0.0.1:0")
 				if err != nil {
-					return nil, err
+					return "", nil, err
 				}
-				lis, h := HandlerWithKeepalive(2 * time.Second)
+				sh := &WSServer{PingInterval: 1 * time.Millisecond}
 				auth := func(fn http.Handler) http.HandlerFunc {
 					return func(w http.ResponseWriter, r *http.Request) {
 						user, pass, _ := r.BasicAuth()
@@ -60,66 +56,63 @@ func TestEndToEnd(t *testing.T) {
 					}
 				}
 				serveMux := http.NewServeMux()
-				serveMux.Handle("/wsnet", auth(h))
+				serveMux.Handle("/wsnet", auth(sh))
 				go func() {
 					err = http.Serve(hl, serveMux)
 					if err != nil {
 						panic(err)
 					}
 				}()
-				return lis, nil
+				return hl.Addr().String(), sh, nil
 			},
 			dialer: func(addr string) (net.Conn, error) { return Dial("ws://testu:password@"+addr+"/wsnet", 2*time.Second) },
 		},
 	} {
-		// get someone to allocate us a port
-		lis, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		addr := lis.Addr().String()
-		lis.Close()
-
-		t.Logf("Starting case %d", rn)
-		server, err := tc.listener(addr)
-		defer server.Close()
-		if server == nil {
-			t.Fatal("couldn't start listening: ", err)
-		}
-		go func() {
-			for {
-				client, err := server.Accept()
-				if client == nil {
-					t.Fatal("couldn't accept: ", err)
-				}
-				b := bufio.NewReader(client)
+		t.Run(tc.name, func(t *testing.T) {
+			addr, server, err := tc.listener()
+			defer server.Close()
+			if server == nil {
+				t.Fatal("couldn't start listening: ", err)
+			}
+			go func() {
 				for {
-					line, err := b.ReadBytes('\n')
+					client, err := server.Accept()
 					if err != nil {
-						break
+						t.Fatalf(err.Error())
 					}
-					client.Write(line)
-				}
-			}
-		}()
+					if client == nil {
+						t.Fatal("couldn't accept: ", err)
+					}
+					b := bufio.NewReader(client)
 
-		for i := 0; i < 5; i++ {
-			conn, err := tc.dialer(addr)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for x := 0; x < 10; x++ {
-				fmt.Fprintf(conn, "PING\n")
-				resp, err := bufio.NewReader(conn).ReadString('\n')
+					for {
+						line, err := b.ReadBytes('\n')
+						if err != nil {
+							break
+						}
+						client.Write(line)
+					}
+				}
+			}()
+
+			for i := 0; i < 5; i++ {
+				conn, err := tc.dialer(addr)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if resp != "PING\n" {
-					t.Fatalf("Expected %q, got %q", "PING\n", resp)
+				for x := 0; x < 10; x++ {
+					fmt.Fprintf(conn, "PING\n")
+					resp, err := bufio.NewReader(conn).ReadString('\n')
+					if err != nil {
+						t.Fatal(err)
+					}
+					if resp != "PING\n" {
+						t.Fatalf("Expected %q, got %q", "PING\n", resp)
+					}
+					time.Sleep(5 * time.Millisecond)
 				}
-				time.Sleep(5 * time.Millisecond)
+				conn.Close()
 			}
-			conn.Close()
-		}
+		})
 	}
 }

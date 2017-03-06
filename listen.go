@@ -5,102 +5,99 @@ import (
 	"net/http"
 	"time"
 
-	"golang.org/x/net/websocket"
+	"github.com/gorilla/websocket"
 )
 
-type wsServer struct {
-	listener     net.Listener
-	conns        chan *wsConn
-	pingInterval time.Duration
+// DefaultPingInterval is how often to send a ping packet over the link, if not
+// otherwise set.
+const DefaultPingInterval = 25 * time.Second
+
+// acceptBacklog is the size of the channel to write connections to.
+const acceptBacklog = 50
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
+// WSServer can be used to serve a network service over websockets. It
+// implements both net.Listener and http.Handler. It should be bound on to a
+// HTTP server, then passed to the network service you're exporting via this as
+// it's net.Listener
+type WSServer struct {
+	// PingInterval is how often to send a ping packet over the connection. This
+	// can be used both to keep it alive, and verify a client is listening. If
+	// this is zero value the interval DefaultPingInterval will be used.
+	PingInterval time.Duration
+
+	conns chan *wsConn
 }
 
 type wsaddr struct{}
 
-// Listen will start a HTTP server on the given listener, and return the
-// net.Listener for the websocket handler on "/"
-func Listen(laddr string) (net.Listener, error) {
-	return ListenWithKeepalive(laddr, 0)
-}
-
-// ListenWithKeepalive will start a HTTP server on the given listener, and
-// return the net.Listener for the websocket handler on "/". It will send
-// traffic down the connection every pingInterval to keep it alive.
-func ListenWithKeepalive(laddr string, pingInterval time.Duration) (net.Listener, error) {
-	listener, err := net.Listen("tcp", laddr)
-	if err != nil {
-		return nil, err
+func (w *WSServer) Accept() (net.Conn, error) {
+	if w.conns == nil {
+		w.conns = make(chan *wsConn, acceptBacklog)
 	}
-	wss := &wsServer{
-		listener:     listener,
-		conns:        make(chan *wsConn),
-		pingInterval: pingInterval,
-	}
-	serveMux := http.NewServeMux()
-	serveMux.Handle("/", websocket.Handler(wss.wsHandler))
-	go func() {
-		err = http.Serve(listener, serveMux)
-		if err != nil {
-			panic(err)
-		}
-	}()
-	return wss, nil
-}
 
-// Handler returns a net.Listener that will be a listener for traffic received
-// over the websocket http.Handler
-func Handler() (net.Listener, http.Handler) {
-	return HandlerWithKeepalive(0)
-}
-
-// HandlerWithKeepalive returns a net.Listener that will be a listener for
-// traffic received over the websocket http.Handler. It will send traffic down
-// the connection every pingInterval to keep it alive.
-func HandlerWithKeepalive(pingInterval time.Duration) (net.Listener, http.Handler) {
-	wss := &wsServer{
-		conns:        make(chan *wsConn),
-		pingInterval: pingInterval,
-	}
-	return wss, websocket.Handler(wss.wsHandler)
-}
-
-func (w *wsServer) Accept() (net.Conn, error) {
 	return <-w.conns, nil
 }
 
-func (w *wsServer) Close() error {
-	if w.listener != nil {
-		return w.listener.Close()
-	}
+// Close is a noop, as there is no network connection to close. Closing should
+// occur at the HTTP server.
+func (w *WSServer) Close() error {
 	return nil
 }
 
-func (w *wsServer) Addr() net.Addr {
-	// This is still legit enough? Maybe?
-	if w.listener != nil {
-		return w.listener.Addr()
-	}
+func (w *WSServer) Addr() net.Addr {
+	// TODO - best way to address this in this context?
 	return &wsaddr{}
 }
 
-func (w *wsServer) wsHandler(ws *websocket.Conn) {
+func (w *WSServer) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(rw, r, nil)
+	if err != nil {
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	closed := make(chan struct{})
-	wsconn := &wsConn{conn: ws, closed: closed}
+	wsconn := &wsConn{conn: conn, closedChan: closed}
 	stopHb := make(chan struct{})
-	if w.pingInterval > 0 {
-		go func() {
-			for {
-				time.Sleep(w.pingInterval)
-				select {
-				case <-stopHb:
-					return
-				default:
+	if w.PingInterval == 0 {
+		w.PingInterval = DefaultPingInterval
+	}
+
+	errC := make(chan error)
+	go func() {
+		ticker := time.NewTicker(w.PingInterval)
+		for {
+			select {
+			case <-ticker.C:
+				wsconn.connMu.Lock()
+				err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(w.PingInterval))
+				if err != nil {
+					errC <- err
 				}
-				websocket.Message.Send(wsconn.conn, []byte{frameTypeKeepalive})
+				wsconn.connMu.Unlock()
+			case <-stopHb:
+				ticker.Stop()
+				return
 			}
-		}()
+		}
+	}()
+
+	if w.conns == nil {
+		w.conns = make(chan *wsConn, acceptBacklog)
 	}
 	w.conns <- wsconn
-	<-closed
+
+	select {
+	case <-closed:
+	case <-errC:
+		// assume client closed
+		wsconn.Close()
+		return
+	}
 	stopHb <- struct{}{}
 }
 
