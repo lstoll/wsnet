@@ -3,10 +3,24 @@
 	"ignore": "test",
 	"package": [
 		{
+			"path": "get",
+			"revision": ""
+		},
+		{
+			"checksumSHA1": "UP2wONSE346WHWwT20G1Xedd6ZI=",
+			"path": "github.com/google/uuid",
+			"revision": "064e2069ce9c359c118179501254f67d7d37ba24",
+			"revisionTime": "2016-11-28T19:12:14Z"
+		},
+		{
 			"checksumSHA1": "G778A9feKkdW7ZjeDdj5qoU0Ku4=",
 			"path": "github.com/gorilla/websocket",
 			"revision": "b258b4fadb573ac412f187b9f31974ea99d32f50",
 			"revisionTime": "2017-03-02T22:46:13Z"
+		},
+		{
+			"path": "go",
+			"revision": ""
 		}
 	],
 	"rootPath": "github.com/lstoll/wsnet"

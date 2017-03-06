@@ -3,6 +3,7 @@ package wsnet
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"testing"
@@ -17,7 +18,7 @@ func TestEndToEnd(t *testing.T) {
 		dialer   func(addr string) (net.Conn, error)
 	}{
 		{
-			name: "Custom handler stuff",
+			name: "Custom handler",
 			listener: func() (string, net.Listener, error) {
 				hl, err := net.Listen("tcp", "127.0.0.1:0")
 				if err != nil {
@@ -67,6 +68,38 @@ func TestEndToEnd(t *testing.T) {
 			},
 			dialer: func(addr string) (net.Conn, error) { return Dial("ws://testu:password@"+addr+"/wsnet", 2*time.Second) },
 		},
+		{
+			name: "Reflected server",
+			listener: func() (string, net.Listener, error) {
+				// Start the reflector
+				hl, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					return "", nil, err
+				}
+				errc := make(chan error, 100)
+				go func() {
+					for err := range errc {
+						log.Printf("Error in WSTunReflector [%v]", err)
+					}
+				}()
+				rh := &WSTunReflector{PingInterval: 1 * time.Millisecond, ErrChan: errc}
+				serveMux := http.NewServeMux()
+				serveMux.Handle("/", rh)
+				go func() {
+					err = http.Serve(hl, serveMux)
+					if err != nil {
+						panic(err)
+					}
+				}()
+				// Create a listener pointing to the reflector
+				lis, err := NewTunListener("ws://" + hl.Addr().String())
+				if err != nil {
+					return "", nil, err
+				}
+				return lis.Addr().String(), lis, nil
+			},
+			dialer: func(addr string) (net.Conn, error) { return Dial(addr, 2*time.Second) },
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			addr, server, err := tc.listener()
@@ -76,7 +109,9 @@ func TestEndToEnd(t *testing.T) {
 			}
 			go func() {
 				for {
+					fmt.Println("Accepting")
 					client, err := server.Accept()
+					fmt.Println("Accepted")
 					if err != nil {
 						t.Fatalf(err.Error())
 					}
@@ -86,10 +121,12 @@ func TestEndToEnd(t *testing.T) {
 					b := bufio.NewReader(client)
 
 					for {
+						fmt.Println("Reading from server connection")
 						line, err := b.ReadBytes('\n')
 						if err != nil {
 							break
 						}
+						fmt.Println("Writing to server connection")
 						client.Write(line)
 					}
 				}
@@ -98,13 +135,18 @@ func TestEndToEnd(t *testing.T) {
 			for i := 0; i < 5; i++ {
 				conn, err := tc.dialer(addr)
 				if err != nil {
-					t.Fatal(err)
+					t.Fatalf("Error dialing addr %q [%v]", addr, err)
 				}
 				for x := 0; x < 10; x++ {
-					fmt.Fprintf(conn, "PING\n")
+					fmt.Println("Writing to client connection")
+					_, err := fmt.Fprintf(conn, "PING\n")
+					if err != nil {
+						t.Fatalf("Error writing to connection [%v]", err)
+					}
+					fmt.Println("Reading from client connection")
 					resp, err := bufio.NewReader(conn).ReadString('\n')
 					if err != nil {
-						t.Fatal(err)
+						t.Fatalf("Error reading from connection [%v]", err)
 					}
 					if resp != "PING\n" {
 						t.Fatalf("Expected %q, got %q", "PING\n", resp)

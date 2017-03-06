@@ -33,7 +33,10 @@ type WSServer struct {
 	conns chan *wsConn
 }
 
-type wsaddr struct{}
+type wsaddr struct {
+	network string
+	addr    string
+}
 
 func (w *WSServer) Accept() (net.Conn, error) {
 	if w.conns == nil {
@@ -51,7 +54,10 @@ func (w *WSServer) Close() error {
 
 func (w *WSServer) Addr() net.Addr {
 	// TODO - best way to address this in this context?
-	return &wsaddr{}
+	return &wsaddr{
+		network: "wsnet",
+		addr:    "wsnet-handler",
+	}
 }
 
 func (w *WSServer) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
@@ -102,9 +108,9 @@ func (w *WSServer) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (w *wsaddr) Network() string {
-	return "wsnet"
+	return w.network
 }
 
 func (w *wsaddr) String() string {
-	return "wsnet-handler"
+	return w.addr
 }
