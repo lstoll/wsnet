@@ -48,6 +48,8 @@ func (w *wsConn) Write(b []byte) (n int, err error) {
 }
 
 func (w *wsConn) Close() error {
+	w.connWMu.Lock()
+	defer w.connWMu.Unlock()
 	_ = w.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	// TODO - we're meant to wait for the server to close now. Maybe set an
 	// error to return for all read/writes, then wait for the close in a

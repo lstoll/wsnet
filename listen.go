@@ -3,6 +3,7 @@ package wsnet
 import (
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -31,6 +32,8 @@ type WSServer struct {
 	PingInterval time.Duration
 
 	conns chan *wsConn
+
+	initMu sync.Mutex
 }
 
 type wsaddr struct {
@@ -39,6 +42,7 @@ type wsaddr struct {
 }
 
 func (w *WSServer) Accept() (net.Conn, error) {
+	w.init()
 	if w.conns == nil {
 		w.conns = make(chan *wsConn, acceptBacklog)
 	}
@@ -61,6 +65,7 @@ func (w *WSServer) Addr() net.Addr {
 }
 
 func (w *WSServer) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	w.init()
 	conn, err := upgrader.Upgrade(rw, r, nil)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)
@@ -103,6 +108,14 @@ func (w *WSServer) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stopHb <- struct{}{}
+}
+
+func (w *WSServer) init() {
+	w.initMu.Lock()
+	defer w.initMu.Unlock()
+	if w.conns == nil {
+		w.conns = make(chan *wsConn, acceptBacklog)
+	}
 }
 
 func (w *wsaddr) Network() string {
