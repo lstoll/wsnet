@@ -1,0 +1,13 @@
+{
+	"comment": "",
+	"ignore": "test",
+	"package": [
+		{
+			"checksumSHA1": "G778A9feKkdW7ZjeDdj5qoU0Ku4=",
+			"path": "github.com/gorilla/websocket",
+			"revision": "b258b4fadb573ac412f187b9f31974ea99d32f50",
+			"revisionTime": "2017-03-02T22:46:13Z"
+		}
+	],
+	"rootPath": "github.com/lstoll/wsnet"
+}

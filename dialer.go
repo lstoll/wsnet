@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"time"
 
-	"golang.org/x/net/websocket"
+	"github.com/gorilla/websocket"
 )
 
 // Dial gives you a net.Conn that talks to a WS destination.
@@ -17,19 +17,15 @@ func Dial(addr string, timeout time.Duration) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	config, err := websocket.NewConfig(addr, addr)
-	if err != nil {
-		return nil, err
-	}
+	var hdr = http.Header{}
 	if u.User != nil {
 		ui := base64.StdEncoding.EncodeToString([]byte(u.User.String()))
-		config.Header = http.Header{
-			"Authorization": {"Basic " + ui},
-		}
+		hdr["Authorization"] = []string{"Basic " + ui}
 	}
-	ws, err := websocket.DialConfig(config)
+	u.User = nil
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), hdr)
 	if err != nil {
 		return nil, err
 	}
-	return &wsConn{conn: ws}, nil
+	return &wsConn{conn: conn}, nil
 }

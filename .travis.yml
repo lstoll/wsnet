@@ -4,5 +4,5 @@ language: go
 sudo: required
 dist: trusty
 go:
-  - 1.6
+  - 1.8
 script: ./script/cibuild
