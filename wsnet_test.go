@@ -3,7 +3,6 @@ package wsnet
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"testing"
@@ -76,13 +75,7 @@ func TestEndToEnd(t *testing.T) {
 				if err != nil {
 					return "", nil, err
 				}
-				errc := make(chan error, 100)
-				go func() {
-					for err := range errc {
-						log.Printf("Error in WSTunReflector [%v]", err)
-					}
-				}()
-				rh := &WSTunReflector{PingInterval: 1 * time.Millisecond, ErrChan: errc}
+				rh := &WSTunReflector{PingInterval: 1 * time.Millisecond}
 				serveMux := http.NewServeMux()
 				serveMux.Handle("/", rh)
 				go func() {
@@ -109,9 +102,7 @@ func TestEndToEnd(t *testing.T) {
 			}
 			go func() {
 				for {
-					fmt.Println("Accepting")
 					client, err := server.Accept()
-					fmt.Println("Accepted")
 					if err != nil {
 						t.Fatalf(err.Error())
 					}
@@ -121,12 +112,10 @@ func TestEndToEnd(t *testing.T) {
 					b := bufio.NewReader(client)
 
 					for {
-						fmt.Println("Reading from server connection")
 						line, err := b.ReadBytes('\n')
 						if err != nil {
 							break
 						}
-						fmt.Println("Writing to server connection")
 						client.Write(line)
 					}
 				}
@@ -138,12 +127,10 @@ func TestEndToEnd(t *testing.T) {
 					t.Fatalf("Error dialing addr %q [%v]", addr, err)
 				}
 				for x := 0; x < 10; x++ {
-					fmt.Println("Writing to client connection")
 					_, err := fmt.Fprintf(conn, "PING\n")
 					if err != nil {
 						t.Fatalf("Error writing to connection [%v]", err)
 					}
-					fmt.Println("Reading from client connection")
 					resp, err := bufio.NewReader(conn).ReadString('\n')
 					if err != nil {
 						t.Fatalf("Error reading from connection [%v]", err)

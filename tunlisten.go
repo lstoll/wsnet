@@ -14,12 +14,55 @@ import (
 
 	"net"
 
+	"encoding/gob"
+
 	"github.com/gogo/protobuf/proto"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/lstoll/wsnet/wsnetpb"
 	"github.com/pkg/errors"
 )
+
+type action int
+
+const (
+	actionInit action = iota
+	actionData
+	actionClose
+)
+
+type message struct {
+	Token   uuid.UUID
+	Action  action
+	Payload []byte
+}
+
+func sendMessage(c *websocket.Conn, msg *message) error {
+	w, err := c.NextWriter(websocket.BinaryMessage)
+	if err != nil {
+		return errors.Wrap(err, "Error getting socket writer")
+	}
+	enc := gob.NewEncoder(w)
+	err = enc.Encode(msg)
+	if err != nil {
+		return errors.Wrap(err, "Error encoding message")
+	}
+	return w.Close()
+}
+
+func receiveMessage(c *websocket.Conn) (*message, error) {
+	_, r, err := c.NextReader()
+	if err != nil {
+		return nil, errors.Wrap(err, "Error getting reader for connection")
+	}
+
+	m := new(message)
+	dec := gob.NewDecoder(r)
+	err = dec.Decode(m)
+	if err != nil {
+		return nil, errors.Wrap(err, "Error decoding message")
+	}
+	return m, nil
+}
 
 // WSTunReflector is a http.Handler that can be used to act as a tunneled
 // service reflector. It should be mounted on a HTTP server accessible to both
@@ -35,16 +78,15 @@ type WSTunReflector struct {
 	// this is zero value the interval DefaultPingInterval will be used.
 	PingInterval time.Duration
 
-	ErrChan chan error
-
-	servers map[string]*reflectedServer
+	servers   map[string]*reflectedServer
+	serversMu sync.RWMutex
 }
 
 type reflectedServer struct {
 	conn      *websocket.Conn
 	connWMu   sync.Mutex
 	clients   map[uuid.UUID]*reflectedClient
-	clientsMu sync.Mutex
+	clientsMu sync.RWMutex
 }
 
 type reflectedClient struct {
@@ -56,11 +98,10 @@ func (r *reflectedServer) closeClient(u uuid.UUID) error {
 	r.connWMu.Lock()
 	defer r.connWMu.Unlock()
 	delete(r.clients, u)
-	req := &wsnetpb.Request{
-		Token: u[:],
-		Msg:   &wsnetpb.Request_ConnectionClose{ConnectionClose: &wsnetpb.ConnectionClose{}},
-	}
-	return proto2conn(req, r.conn)
+	return sendMessage(r.conn, &message{
+		Token:  u,
+		Action: actionClose,
+	})
 }
 
 func (w *WSTunReflector) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
@@ -70,6 +111,9 @@ func (w *WSTunReflector) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		rw.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(rw, "Request path needs to be in form of /[server|client]/<identifier>, got %q", r.URL.Path)
 		return
+	}
+	if rt == "server" {
+		w.serversMu.Lock()
 	}
 	svr, svrExists := w.servers[id]
 	var setServerConn bool
@@ -90,7 +134,6 @@ func (w *WSTunReflector) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		w.servers[id] = svr
 	case "client":
 		if !svrExists {
-			log.Printf("client no server")
 			rw.WriteHeader(http.StatusNotFound)
 			fmt.Fprintf(rw, "No server at ID %q", id)
 			return
@@ -103,7 +146,6 @@ func (w *WSTunReflector) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 
 	conn, err := upgrader.Upgrade(rw, r, nil)
 	if err != nil {
-		w.ErrChan <- err
 		rw.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(rw, "Error upgrading websocket: %q", err)
 		return
@@ -120,14 +162,13 @@ func (w *WSTunReflector) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			select {
 			case <-ticker.C:
 				err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(w.PingInterval))
-				if err != nil && w.ErrChan != nil {
-					if svr != nil {
+				if err != nil {
+					if rt == "server" {
 						for _, c := range svr.clients {
 							c.conn.Close()
 						}
 						conn.Close()
 					}
-					w.ErrChan <- err
 				}
 			case <-stopHb:
 				ticker.Stop()
@@ -143,12 +184,17 @@ func (w *WSTunReflector) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			c.conn.Close()
 		}
 		delete(w.servers, id)
+		if err != nil {
+			log.Printf("WSTunReflector: error returned from handling server\n%+v\n\n", err)
+		}
 	case "client":
 		err = w.serveClient(svr, conn)
-	}
-	// TODO - error handling here?
-	if err != nil && w.ErrChan != nil {
-		w.ErrChan <- err
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(errors.Cause(err), websocket.CloseNormalClosure,
+				websocket.CloseGoingAway) {
+				log.Printf("WSTunReflector: error returned from handling client\n%+v\n\n", err)
+			}
+		}
 	}
 	stopHb <- struct{}{}
 	conn.Close()
@@ -157,31 +203,28 @@ func (w *WSTunReflector) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 func (w *WSTunReflector) serveServer(svr *reflectedServer, conn *websocket.Conn) error {
 	// run a read loop, unpack message, find client, send
 	for {
-		_, b, err := conn.ReadMessage()
+		msg, err := receiveMessage(conn)
 		if err != nil {
 			return err
 		}
-		rsp := &wsnetpb.Response{}
-		err = proto.Unmarshal(b, rsp)
-		fmt.Printf("%s", string(b))
-		if err != nil {
-			return errors.Wrap(err, "Error unmarshaling response from remote listener")
-		}
-		u := b2uuid(rsp.Token)
-		switch msg := rsp.Msg.(type) {
-		case *wsnetpb.Response_ConnectionData:
-			cl, ok := svr.clients[u]
+		switch msg.Action {
+		case actionData:
+			cl, ok := svr.clients[msg.Token]
 			if !ok {
 				// TODO - notify the server that the connection is closed
 			} else {
-				err := cl.conn.WriteMessage(websocket.BinaryMessage, msg.ConnectionData)
+				err := cl.conn.WriteMessage(websocket.BinaryMessage, msg.Payload)
 				if err != nil {
 					cl.conn.Close()
-					svr.closeClient(u)
+					svr.closeClient(msg.Token)
 				}
 			}
-		case *wsnetpb.Response_ConnectionClose:
-			err := svr.closeClient(u)
+		case actionClose:
+			// cl, ok := svr.clients[msg.Token]
+			// if ok {
+			// 	cl.conn.Close()
+			// }
+			err := svr.closeClient(msg.Token)
 			if err != nil {
 				return err
 			}
@@ -190,6 +233,9 @@ func (w *WSTunReflector) serveServer(svr *reflectedServer, conn *websocket.Conn)
 }
 
 func (w *WSTunReflector) serveClient(svr *reflectedServer, conn *websocket.Conn) error {
+	// always gracefully close the connection
+	defer conn.Close()
+
 	// create an id for this client
 	u := uuid.New()
 	svr.clientsMu.Lock()
@@ -198,54 +244,26 @@ func (w *WSTunReflector) serveClient(svr *reflectedServer, conn *websocket.Conn)
 	defer svr.closeClient(u)
 
 	// Start a session
-	req := &wsnetpb.Request{
-		Token: u[:],
-		Msg: &wsnetpb.Request_ConnectionInit{
-			ConnectionInit: &wsnetpb.ConnectionInit{},
-		},
-	}
-	d, err := proto.Marshal(req)
+	svr.connWMu.Lock()
+	err := sendMessage(svr.conn, &message{Token: u, Action: actionInit})
+	svr.connWMu.Unlock()
 	if err != nil {
 		return err
 	}
-	svr.connWMu.Lock()
-	log.Printf("WSTunReflector: writing to list server: %#v", req.Msg)
-
-	err = svr.conn.WriteMessage(websocket.BinaryMessage, d)
-	svr.connWMu.Unlock()
 
 	// run a read loop, send to server
 	for {
-		log.Print("reflect: read from client")
 		_, b, err := conn.ReadMessage()
-		log.Print("reflect: data has been read from client")
-
 		if err != nil {
-			return err
+			return errors.Wrap(err, "Error reading message from client connection")
 		}
-		log.Print("reflect: creating request method")
-
-		req := &wsnetpb.Request{
-			Token: u[:],
-			Msg: &wsnetpb.Request_ConnectionData{
-				ConnectionData: b,
-			},
-		}
-		d, err := proto.Marshal(req)
-		if err != nil {
-			return err
-		}
-		log.Print("reflect: acquiring server conn lock")
-
-		log.Print("reflect: writing message to listen host")
 
 		svr.connWMu.Lock()
-		err = svr.conn.WriteMessage(websocket.BinaryMessage, d)
+		err = sendMessage(svr.conn, &message{Token: u, Action: actionData, Payload: b})
 		svr.connWMu.Unlock()
 		if err != nil {
-			return err
+			return errors.Wrap(err, "Error writing message to server connection")
 		}
-		log.Print("reflect: data written")
 	}
 }
 
@@ -270,20 +288,10 @@ type wsTunServer struct {
 	connsMu sync.Mutex
 }
 
-func (w *wsTunServer) writeMessage(rsp *wsnetpb.Response) error {
+func (w *wsTunServer) writeMessage(m *message) error {
 	w.wsconnWMu.Lock()
 	defer w.wsconnWMu.Unlock()
-
-	d, err := proto.Marshal(rsp)
-	if err != nil {
-		return errors.Wrap(err, "Error marshaling proto response")
-	}
-
-	err = w.wsconn.WriteMessage(websocket.BinaryMessage, d)
-	if err != nil {
-		return errors.Wrap(err, "Error writing to websocket")
-	}
-	return nil
+	return sendMessage(w.wsconn, m)
 }
 
 // NewTunListener will create a net.Listener that exports its connections at
@@ -324,6 +332,10 @@ func NewTunListener(addr string) (net.Listener, error) {
 		PingInterval: DefaultPingInterval,
 		wsconn:       conn,
 		addr:         u.String(),
+		conns:        make(map[uuid.UUID]*tunConn),
+		acceptC:      make(chan *tunConn),
+		acceptErrC:   make(chan error),
+		close:        make(chan struct{}),
 	}
 	go ts.pollConn()
 	return ts, nil
@@ -346,59 +358,40 @@ func (w *wsTunServer) pollConn() {
 }
 
 func (w *wsTunServer) connRead() error {
-	log.Print("wsTunServer: connRead start")
-	_, b, err := w.wsconn.ReadMessage()
-
-	req := &wsnetpb.Request{}
-	err = proto.Unmarshal(b, req)
-
+	msg, err := receiveMessage(w.wsconn)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("wsTunServer: received data token %#v msg %#v", req.Token, req.Msg)
+	w.connsMu.Lock()
+	defer w.connsMu.Unlock()
 
-	log.Print("wsTunServer: connRead data read")
-
-	//log.Print("wsTunServer: acquire conns mu")
-	//w.connsMu.Lock()
-	//defer w.connsMu.Unlock()
-
-	u := b2uuid(req.Token)
-	switch msg := req.Msg.(type) {
-	case *wsnetpb.Request_ConnectionInit:
-		log.Print("wsTunServer: connection init")
+	switch msg.Action {
+	case actionInit:
 		conn := &tunConn{
-			clientID: u,
-			svr:      w,
+			clientID:  msg.Token,
+			svr:       w,
+			recvBytes: make(chan []byte, 1024),
+			closeC:    make(chan struct{}),
 		}
-		w.conns[u] = conn
+		w.conns[msg.Token] = conn
 		w.acceptC <- conn
-	case *wsnetpb.Request_ConnectionClose:
-		conn, ok := w.conns[u]
+	case actionClose:
+		conn, ok := w.conns[msg.Token]
 		if ok {
 			conn.err = ErrClosed
-			delete(w.conns, u)
+			conn.closeC <- struct{}{}
+			delete(w.conns, msg.Token)
 		}
-	case *wsnetpb.Request_ConnectionData:
-		conn, ok := w.conns[u]
+	case actionData:
+		conn, ok := w.conns[msg.Token]
 		if ok {
-			conn.recvMu.Lock()
-			conn.recvBuffer = append(conn.recvBuffer, msg.ConnectionData...)
-			conn.recvMu.Unlock()
+			conn.recvBytes <- msg.Payload
 		} else {
 			// Notify the server that conn is closed
-			msg := &wsnetpb.Response{
-				Token: req.Token,
-				Msg:   &wsnetpb.Response_ConnectionClose{},
-			}
-
-			d, err := proto.Marshal(msg)
-			if err != nil {
-				return err
-			}
-
-			err = w.wsconn.WriteMessage(websocket.BinaryMessage, d)
+			w.wsconnWMu.Lock()
+			sendMessage(w.wsconn, &message{Token: msg.Token, Action: actionClose})
+			w.wsconnWMu.Unlock()
 			if err != nil {
 				return err
 			}
@@ -438,10 +431,11 @@ type tunConn struct {
 	clientID uuid.UUID
 	// Pass in the whole server instance to use it's conn and lock
 	svr        *wsTunServer
+	recvBytes  chan []byte
 	recvBuffer []byte
-	recvMu     sync.Mutex
 	// stick something to return on next read/write
-	err error
+	err    error
+	closeC chan struct{}
 }
 
 var (
@@ -449,51 +443,39 @@ var (
 )
 
 func (t *tunConn) Read(b []byte) (n int, err error) {
-	log.Print("tunConn: read called")
-	if t.err != nil {
-		return 0, t.err
+	if len(t.recvBuffer) > 0 {
+		copied := copy(b, t.recvBuffer)
+		t.recvBuffer = t.recvBuffer[copied:]
+		return copied, nil
 	}
 
-	t.recvMu.Lock()
-	defer t.recvMu.Unlock()
-	if t.err != nil {
-		return 0, err
+	select {
+	case msg := <-t.recvBytes:
+		copied := copy(b, msg)
+		if copied < len(msg) {
+			t.recvBuffer = msg[copied:]
+		}
+		return copied, nil
+	case <-t.closeC:
+		return 0, t.err
 	}
-	if len(t.recvBuffer) == 0 {
-		return 0, nil
-	}
-	copied := copy(b, t.recvBuffer)
-	t.recvBuffer = t.recvBuffer[copied:]
-	return copied, nil
 }
 
 func (t *tunConn) Write(b []byte) (n int, err error) {
-	log.Print("tunConn: write called")
 	if t.err != nil {
 		return 0, t.err
 	}
 
-	msg := &wsnetpb.Response{
-		Token: t.clientID[:],
-		Msg: &wsnetpb.Response_ConnectionData{
-			ConnectionData: b,
-		},
+	err = t.svr.writeMessage(&message{Token: t.clientID, Action: actionData, Payload: b})
+	if err != nil {
+		return 0, err
 	}
-
-	err = t.svr.writeMessage(msg)
 
 	return len(b), nil
 }
 
 func (t *tunConn) Close() error {
-	msg := &wsnetpb.Response{
-		Token: t.clientID[:],
-		Msg: &wsnetpb.Response_ConnectionClose{
-			ConnectionClose: &wsnetpb.ConnectionClose{},
-		},
-	}
-
-	err := t.svr.writeMessage(msg)
+	err := t.svr.writeMessage(&message{Token: t.clientID, Action: actionClose})
 	if err != nil {
 		return err
 	}

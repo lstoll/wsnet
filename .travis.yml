@@ -5,4 +5,4 @@ sudo: required
 dist: trusty
 go:
   - 1.8
-script: go test -v $(go list ./... | grep -v /vendor/)
+script: make build && make test

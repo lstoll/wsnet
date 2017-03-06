@@ -79,12 +79,10 @@ func (w *WSServer) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case <-ticker.C:
-				wsconn.connMu.Lock()
 				err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(w.PingInterval))
 				if err != nil {
 					errC <- err
 				}
-				wsconn.connMu.Unlock()
 			case <-stopHb:
 				ticker.Stop()
 				return

@@ -11,7 +11,8 @@ import (
 
 type wsConn struct {
 	conn       *websocket.Conn
-	connMu     sync.Mutex
+	connRMu    sync.Mutex
+	connWMu    sync.Mutex
 	closedChan chan struct{} // Used for notifing that we're closed.
 	recvBuffer []byte
 }
@@ -23,8 +24,8 @@ func (w *wsConn) Read(b []byte) (n int, err error) {
 		return copied, nil
 	}
 
-	w.connMu.Lock()
-	defer w.connMu.Unlock()
+	w.connRMu.Lock()
+	defer w.connRMu.Unlock()
 
 	_, msg, err := w.conn.ReadMessage()
 	if err != nil {
@@ -39,16 +40,18 @@ func (w *wsConn) Read(b []byte) (n int, err error) {
 }
 
 func (w *wsConn) Write(b []byte) (n int, err error) {
-	w.connMu.Lock()
-	defer w.connMu.Unlock()
+	w.connWMu.Lock()
+	defer w.connWMu.Unlock()
 	n = len(b)
 	err = w.conn.WriteMessage(websocket.BinaryMessage, b)
 	return
 }
 
 func (w *wsConn) Close() error {
-	w.connMu.Lock()
-	defer w.connMu.Unlock()
+	_ = w.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	// TODO - we're meant to wait for the server to close now. Maybe set an
+	// error to return for all read/writes, then wait for the close in a
+	// goroutine?
 	if w.closedChan != nil {
 		select {
 		case w.closedChan <- struct{}{}:
