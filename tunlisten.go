@@ -112,95 +112,76 @@ func (w *WSTunReflector) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(rw, "Request path needs to be in form of /[server|client]/<identifier>, got %q", r.URL.Path)
 		return
 	}
-	if rt == "server" {
-		w.serversMu.Lock()
-	}
-	svr, svrExists := w.servers[id]
-	var setServerConn bool
+	var err error
 	switch rt {
 	case "server":
-		if svrExists {
-			rw.WriteHeader(http.StatusConflict)
-			fmt.Fprintf(rw, "Server already exists at ID %q", id)
-			return
-		}
-		svr = &reflectedServer{
-			clients: make(map[uuid.UUID]*reflectedClient),
-		}
-		setServerConn = true
-		if w.servers == nil {
-			w.servers = make(map[string]*reflectedServer)
-		}
-		w.servers[id] = svr
+		err = w.serveServer(rw, r, id)
+
 	case "client":
-		if !svrExists {
-			rw.WriteHeader(http.StatusNotFound)
-			fmt.Fprintf(rw, "No server at ID %q", id)
-			return
-		}
+		err = w.serveClient(rw, r, id)
 	default:
 		rw.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(rw, "Remote type not server or client")
 		return
 	}
 
+	if err != nil {
+		if websocket.IsUnexpectedCloseError(errors.Cause(err), websocket.CloseNormalClosure,
+			websocket.CloseGoingAway) {
+			log.Printf("WSTunReflector: error returned from %s handler\n%+v\n\n", rt, err)
+		}
+	}
+}
+
+func (w *WSTunReflector) serveServer(rw http.ResponseWriter, r *http.Request, id string) error {
+	// Ensure we're a new server, and set up
+	w.serversMu.Lock()
+	defer w.serversMu.Unlock()
+	svr, svrExists := w.servers[id]
+	if svrExists {
+		rw.WriteHeader(http.StatusConflict)
+		fmt.Fprintf(rw, "Server already exists at ID %q", id)
+		return nil
+	}
+
 	conn, err := upgrader.Upgrade(rw, r, nil)
 	if err != nil {
 		rw.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(rw, "Error upgrading websocket: %q", err)
-		return
+		return nil
 	}
 
-	if setServerConn {
-		svr.conn = conn
+	svr = &reflectedServer{
+		clients: make(map[uuid.UUID]*reflectedClient),
+		conn:    conn,
 	}
+	if w.servers == nil {
+		w.servers = make(map[string]*reflectedServer)
+	}
+	w.servers[id] = svr
 
-	stopHb := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(w.PingInterval)
-		for {
-			select {
-			case <-ticker.C:
-				err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(w.PingInterval))
-				if err != nil {
-					if rt == "server" {
-						for _, c := range svr.clients {
-							c.conn.Close()
-						}
-						conn.Close()
-					}
-				}
-			case <-stopHb:
-				ticker.Stop()
-				return
-			}
-		}
-	}()
+	w.serversMu.Unlock()
 
-	switch rt {
-	case "server":
-		err = w.serveServer(svr, conn)
+	stopHBC := make(chan struct{})
+
+	// Ensure we always close all clients, and deregister ourselves
+	defer func() {
+		stopHBC <- struct{}{}
+		w.serversMu.Lock()
 		for _, c := range svr.clients {
+			_ = c.conn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseGoingAway, "Server shutting down"))
 			c.conn.Close()
 		}
 		delete(w.servers, id)
-		if err != nil {
-			log.Printf("WSTunReflector: error returned from handling server\n%+v\n\n", err)
-		}
-	case "client":
-		err = w.serveClient(svr, conn)
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(errors.Cause(err), websocket.CloseNormalClosure,
-				websocket.CloseGoingAway) {
-				log.Printf("WSTunReflector: error returned from handling client\n%+v\n\n", err)
-			}
-		}
-	}
-	stopHb <- struct{}{}
-	conn.Close()
-}
+		w.serversMu.Unlock()
+	}()
 
-func (w *WSTunReflector) serveServer(svr *reflectedServer, conn *websocket.Conn) error {
+	// start the heartbeater
+	hberrC := w.startPinger(conn, stopHBC)
+	// TODO - how to insert a heartbeat error in to our flow?
+	_ = hberrC
+
 	// run a read loop, unpack message, find client, send
 	for {
 		msg, err := receiveMessage(conn)
@@ -232,7 +213,30 @@ func (w *WSTunReflector) serveServer(svr *reflectedServer, conn *websocket.Conn)
 	}
 }
 
-func (w *WSTunReflector) serveClient(svr *reflectedServer, conn *websocket.Conn) error {
+func (w *WSTunReflector) serveClient(rw http.ResponseWriter, r *http.Request, id string) error {
+	w.serversMu.RLock()
+	svr, svrExists := w.servers[id]
+	w.serversMu.RUnlock()
+	if !svrExists {
+		rw.WriteHeader(http.StatusNotFound)
+		fmt.Fprintf(rw, "No server at ID %q", id)
+		return nil
+	}
+
+	conn, err := upgrader.Upgrade(rw, r, nil)
+	if err != nil {
+		rw.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(rw, "Error upgrading websocket: %q", err)
+		return nil
+	}
+
+	stopHBC := make(chan struct{})
+	// start the heartbeater
+	hberrC := w.startPinger(conn, stopHBC)
+	// TODO - how to insert a heartbeat error in to our flow?
+	_ = hberrC
+	defer func() { stopHBC <- struct{}{} }()
+
 	// always gracefully close the connection
 	defer conn.Close()
 
@@ -245,7 +249,7 @@ func (w *WSTunReflector) serveClient(svr *reflectedServer, conn *websocket.Conn)
 
 	// Start a session
 	svr.connWMu.Lock()
-	err := sendMessage(svr.conn, &message{Token: u, Action: actionInit})
+	err = sendMessage(svr.conn, &message{Token: u, Action: actionInit})
 	svr.connWMu.Unlock()
 	if err != nil {
 		return err
@@ -265,6 +269,28 @@ func (w *WSTunReflector) serveClient(svr *reflectedServer, conn *websocket.Conn)
 			return errors.Wrap(err, "Error writing message to server connection")
 		}
 	}
+}
+
+func (w *WSTunReflector) startPinger(conn *websocket.Conn, stopChan chan struct{}) chan error {
+	errC := make(chan error)
+	go func() {
+		ticker := time.NewTicker(w.PingInterval)
+		for {
+			select {
+			case <-ticker.C:
+				err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(w.PingInterval))
+				if err != nil {
+					errC <- err
+					ticker.Stop()
+					return
+				}
+			case <-stopChan:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+	return errC
 }
 
 // wsTunServer is a net.Listener that will dial-out to the reflector, and then
