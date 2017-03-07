@@ -6,7 +6,10 @@ import (
 
 	"sync"
 
+	"io"
+
 	"github.com/gorilla/websocket"
+	"github.com/pkg/errors"
 )
 
 type wsConn struct {
@@ -15,9 +18,11 @@ type wsConn struct {
 	connWMu    sync.Mutex
 	closedChan chan struct{} // Used for notifing that we're closed.
 	recvBuffer []byte
+	// The addr to return for this connection.
+	addr string
 }
 
-func (w *wsConn) Read(b []byte) (n int, err error) {
+func (w *wsConn) Read(b []byte) (int, error) {
 	if len(w.recvBuffer) > 0 {
 		copied := copy(b, w.recvBuffer)
 		w.recvBuffer = w.recvBuffer[copied:]
@@ -29,7 +34,13 @@ func (w *wsConn) Read(b []byte) (n int, err error) {
 
 	_, msg, err := w.conn.ReadMessage()
 	if err != nil {
-		return 0, err
+		if websocket.IsCloseError(errors.Cause(err),
+			websocket.CloseNormalClosure,
+			websocket.CloseGoingAway,
+		) {
+			return 0, io.EOF
+		}
+		return 0, errors.Wrap(err, "Error reading from underlying websocket")
 	}
 
 	copied := copy(b, msg)
@@ -39,12 +50,21 @@ func (w *wsConn) Read(b []byte) (n int, err error) {
 	return copied, nil
 }
 
-func (w *wsConn) Write(b []byte) (n int, err error) {
+func (w *wsConn) Write(b []byte) (int, error) {
 	w.connWMu.Lock()
 	defer w.connWMu.Unlock()
-	n = len(b)
-	err = w.conn.WriteMessage(websocket.BinaryMessage, b)
-	return
+	n := len(b)
+	err := w.conn.WriteMessage(websocket.BinaryMessage, b)
+	if err != nil {
+		if websocket.IsCloseError(errors.Cause(err),
+			websocket.CloseNormalClosure,
+			websocket.CloseGoingAway,
+		) {
+			return 0, io.EOF
+		}
+		return 0, errors.Wrap(err, "Error writing to underlying websocket")
+	}
+	return n, err
 }
 
 func (w *wsConn) Close() error {
@@ -68,6 +88,9 @@ func (w *wsConn) LocalAddr() net.Addr {
 }
 
 func (w *wsConn) RemoteAddr() net.Addr {
+	if w.addr != "" {
+		return &wsaddr{network: "wsnet", addr: w.addr}
+	}
 	return w.conn.RemoteAddr()
 }
 

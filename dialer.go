@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pkg/errors"
 )
 
 // Dial gives you a net.Conn that talks to a WS destination.
@@ -15,7 +16,7 @@ import (
 func Dial(addr string, timeout time.Duration) (net.Conn, error) {
 	u, err := url.Parse(addr)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "wsnet Dial error parsing addr %q", addr)
 	}
 	var hdr = http.Header{}
 	if u.User != nil {
@@ -27,5 +28,5 @@ func Dial(addr string, timeout time.Duration) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &wsConn{conn: conn}, nil
+	return &wsConn{conn: conn, addr: addr}, nil
 }

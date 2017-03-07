@@ -16,7 +16,8 @@ import (
 
 	"encoding/gob"
 
-	"github.com/gogo/protobuf/proto"
+	"io"
+
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
@@ -95,6 +96,8 @@ type reflectedClient struct {
 
 // closeClient notifies the server that a client is gone, and removes it from the list
 func (r *reflectedServer) closeClient(u uuid.UUID) error {
+	r.clientsMu.Lock()
+	defer r.clientsMu.Unlock()
 	r.connWMu.Lock()
 	defer r.connWMu.Unlock()
 	delete(r.clients, u)
@@ -386,7 +389,7 @@ func (w *wsTunServer) pollConn() {
 func (w *wsTunServer) connRead() error {
 	msg, err := receiveMessage(w.wsconn)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error receiving message from server websocket")
 	}
 
 	w.connsMu.Lock()
@@ -405,7 +408,7 @@ func (w *wsTunServer) connRead() error {
 	case actionClose:
 		conn, ok := w.conns[msg.Token]
 		if ok {
-			conn.err = ErrClosed
+			conn.err = io.EOF
 			conn.closeC <- struct{}{}
 			delete(w.conns, msg.Token)
 		}
@@ -419,7 +422,7 @@ func (w *wsTunServer) connRead() error {
 			sendMessage(w.wsconn, &message{Token: msg.Token, Action: actionClose})
 			w.wsconnWMu.Unlock()
 			if err != nil {
-				return err
+				return errors.Wrap(err, "Error notifying server of client close")
 			}
 		}
 	default:
@@ -464,11 +467,7 @@ type tunConn struct {
 	closeC chan struct{}
 }
 
-var (
-	ErrClosed = errors.New("connection closed")
-)
-
-func (t *tunConn) Read(b []byte) (n int, err error) {
+func (t *tunConn) Read(b []byte) (int, error) {
 	if len(t.recvBuffer) > 0 {
 		copied := copy(b, t.recvBuffer)
 		t.recvBuffer = t.recvBuffer[copied:]
@@ -483,18 +482,18 @@ func (t *tunConn) Read(b []byte) (n int, err error) {
 		}
 		return copied, nil
 	case <-t.closeC:
-		return 0, t.err
+		return 0, io.EOF
 	}
 }
 
-func (t *tunConn) Write(b []byte) (n int, err error) {
+func (t *tunConn) Write(b []byte) (int, error) {
 	if t.err != nil {
 		return 0, t.err
 	}
 
-	err = t.svr.writeMessage(&message{Token: t.clientID, Action: actionData, Payload: b})
+	err := t.svr.writeMessage(&message{Token: t.clientID, Action: actionData, Payload: b})
 	if err != nil {
-		return 0, err
+		return 0, errors.Wrap(err, "Error writing message to reflector server in Write")
 	}
 
 	return len(b), nil
@@ -503,12 +502,12 @@ func (t *tunConn) Write(b []byte) (n int, err error) {
 func (t *tunConn) Close() error {
 	err := t.svr.writeMessage(&message{Token: t.clientID, Action: actionClose})
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error writing message to reflector server in Close")
 	}
 
 	delete(t.svr.conns, t.clientID)
 
-	t.err = ErrClosed
+	t.err = io.EOF
 
 	return nil
 }
@@ -532,19 +531,4 @@ func (t *tunConn) SetReadDeadline(tm time.Time) error {
 
 func (t *tunConn) SetWriteDeadline(tm time.Time) error {
 	return nil
-}
-
-func b2uuid(u []byte) uuid.UUID {
-	r := [16]byte{}
-	copy(r[:], u)
-	return uuid.UUID(r)
-}
-
-func proto2conn(msg proto.Message, conn *websocket.Conn) error {
-	d, err := proto.Marshal(msg)
-	if err != nil {
-		return err
-	}
-
-	return conn.WriteMessage(websocket.BinaryMessage, d)
 }
